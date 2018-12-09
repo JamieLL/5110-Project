@@ -1,0 +1,254 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+---
+
+## 0 Loading Data
+```{r}
+library(tidyverse)
+library(readr)
+library(dplyr)
+library(modelr)
+#caculate purchase in cities costumers live in
+#customer_state
+customers_dataset <- read_csv("olist_customers_dataset.csv")
+#order_seller_value
+items_dataset <- read_csv("olist_order_items_dataset.csv")
+#order_customer_time
+orders_dataset <- read_csv("olist_orders_dataset.csv")
+#location_state
+geolocation_dataset <- read_csv("olist_geolocation_dataset.csv")
+#order_payment
+order_payments_dataset <- read_csv("olist_order_payments_dataset.csv")
+#seller_state
+sellers_dataset <- read_csv("olist_sellers_dataset.csv")
+```
+
+## 1 customer
+### 1.1 price data for each customer
+```{r}
+#calculate order price : order_id, totalprice for each order
+order_price <- summarise(group_by(items_dataset, order_id), total = sum(price))
+
+customer_price <- inner_join(orders_dataset, order_price, by = "order_id") %>% 
+  filter(order_status %in% 'delivered') %>% 
+  select(order_id, customer_id, total, order_approved_at) %>% 
+  mutate(time=substr(order_approved_at, 1, 7)) %>%
+  select(-4)
+```
+
+### 1.2 price data for each city, use data from 1.1
+```{r}
+#calculate city price
+city_cus_price <- inner_join(customer_price, customers_dataset, by = "customer_id") %>% 
+  select(3, 4, 6:8) %>% 
+  group_by(customer_zip_code_prefix, customer_state) %>% 
+  summarise(total=sum(total))
+```
+
+### 1.3 map data
+```{r}
+geo_state <- distinct(geolocation_dataset, geolocation_dataset$geolocation_state, .keep_all = T)
+# add latitude and langtitude by code
+code_price <- inner_join(city_cus_price, geolocation_dataset, by = c("customer_zip_code_prefix" = 'geolocation_zip_code_prefix')) %>% 
+  distinct(customer_zip_code_prefix, .keep_all = T) %>% 
+  arrange(customer_zip_code_prefix)
+
+# calculate total price for each state
+state_cus <-  city_cus_price %>% 
+  group_by(customer_state) %>% 
+  summarise(state_total = sum(total))
+# add latitude and langtitude to state
+geo_state_cus <- inner_join(state_cus, geo_state, by=c('customer_state'='geolocation_state')) %>% 
+  select(1,2,4,5)
+```
+
+```{r}
+library(maptools)
+library(raster)
+adm1 <- getData('GADM', country='BR', level=0)
+adm2 <- getData('GADM', country='BR', level=1)
+fadm1 = fortify(adm1)
+fadm2 = fortify(adm2)
+```
+
+### 1.4 plot state
+```{r}
+ggplot(data = fadm1, mapping = aes(x = long, y = lat, group = group)) + 
+  geom_path() +
+  geom_polygon(data = fadm2, aes(x = long, y = lat),
+               fill = 'grey', alpha = 0.5) +
+  geom_path(data = fadm2, aes(x = long, y = lat), color = "black") + 
+  theme_bw() +
+  geom_point(data = geo_state_cus, mapping = aes(x = geolocation_lng, y = geolocation_lat, group = customer_state, color = customer_state, size = state_total))
+```
+
+### 1.5 plot city
+```{r}
+code_price <- filter(code_price, geolocation_lat < 0)
+ggplot(data = fadm1, mapping = aes(x = long, y = lat, group = group)) + 
+  geom_path() +
+  geom_polygon(data = fadm2, aes(x = long, y = lat),
+               fill = 'grey', alpha = 0.5) +
+  geom_path(data = fadm2, aes(x = long, y = lat), color = "black") + 
+  theme_bw() +
+  geom_point(data = code_price, mapping = aes(x = geolocation_lng, y = geolocation_lat, group = customer_state, color = customer_state, size = total))
+```
+
+## 2 Seller
+### 2.1 price data for each seller
+```{r}
+#calculate order price : order_id, totalprice for each order
+order_price <- summarise(group_by(items_dataset, order_id), total = sum(price)) %>% 
+  left_join(select(items_dataset, 1, 4), by = 'order_id') %>% 
+  distinct(order_id, .keep_all = T)
+
+seller_price <- inner_join(orders_dataset, order_price, by = "order_id") %>% 
+  filter(order_status %in% 'delivered') %>% 
+  select(order_id, seller_id, total, order_approved_at) %>% 
+  mutate(time=substr(order_approved_at, 1, 7)) %>%
+  select(-4)
+```
+
+### 2.2 price data for each city, use data from 1.1
+```{r}
+#calculate city price
+city_seller <- inner_join(seller_price, sellers_dataset, by = "seller_id") %>% 
+  select(3, 5, 7) %>% 
+  group_by(seller_zip_code_prefix, seller_state) %>% 
+  summarise(total = sum(total))
+```
+
+### 2.3 map data
+```{r}
+geo_state <- distinct(geolocation_dataset, geolocation_dataset$geolocation_state, .keep_all = T)
+# add latitude and langtitude by code
+code_price_seller <- inner_join(city_seller, geolocation_dataset, by = c("seller_zip_code_prefix" = "geolocation_zip_code_prefix")) %>% 
+  distinct(seller_zip_code_prefix, .keep_all = T) %>% 
+  arrange(seller_zip_code_prefix)
+
+# calculate total price for each state
+state_seller <-  city_seller %>% 
+  group_by(seller_state) %>% 
+  summarise(state_total = sum(total))
+# add latitude and langtitude to state
+geo_state_seller <- inner_join(state_seller, geo_state, by=c('seller_state' = 'geolocation_state')) %>% 
+  select(1,2,4,5) %>% 
+  arrange(desc(state_total))
+# print top 10 state
+state_seller %>% 
+  arrange(desc(state_total)) %>% 
+  top_n(10, state_total)
+```
+
+##### write.csv of seller state
+```{r}
+write.csv(code_price_seller, 'seller_price.csv', row.names = T)
+```
+
+### 2.4 plot state
+#### method 1
+```{r}
+ggplot(data = fadm1, mapping = aes(x = long, y = lat, group = group)) + 
+  geom_path() +
+  geom_polygon(data = fadm2, aes(x = long, y = lat),
+               fill = 'grey', alpha = 0.5) +
+  geom_path(data = fadm2, aes(x = long, y = lat), color = "black") + 
+  theme_bw() +
+  geom_point(data = geo_state_seller, mapping = aes(x = geolocation_lng, y = geolocation_lat, group = seller_state, color = seller_state, size = state_total))
+```
+#### method 2
+```{r}
+ggplot(geo_state_seller)  + 
+  borders("world", regions = "Brazil",  colour = "black") + 
+  theme_bw() + 
+  # xlab("Longitude (decimals)") + 
+  # ylab("Latitude (decimals)") + 
+  theme(panel.border = element_blank(), panel.grid.major = element_line(colour = "grey80"), panel.grid.minor = element_blank()) + 
+  geom_point(mapping = aes(x = geolocation_lng, y = geolocation_lat, color = seller_state, size = state_total), alpha = 2/3)
+```
+
+### 2.5 plot city
+```{r}
+ggplot(code_price_seller)  + 
+  borders("world", regions = "Brazil",  colour = "black") + 
+  theme_bw() + 
+  # xlab("Longitude (decimals)") + 
+  # ylab("Latitude (decimals)") + 
+  theme(panel.border = element_blank(), panel.grid.major = element_line(colour = "grey80"), panel.grid.minor = element_blank()) + 
+  geom_point(mapping = aes(x = geolocation_lng, y = geolocation_lat, color = seller_state, size = total), alpha = 2/3)
+```
+
+## 3 v.s. population
+```{r}
+pop <- read.csv('state_popu.csv')
+colnames(pop) <- c('state', 'population')
+geo_pop <- inner_join(pop, geo_state, by = c('state' = 'geolocation_state'))
+```
+
+### 3.1 corelation between cus and seller
+```{r}
+colnames(state_cus)[2] <- 'total_cus'
+colnames(state_seller)[2] <- 'total_seller'
+cus_seller <- inner_join(state_cus, state_seller, by = c('customer_state' = 'seller_state')) %>% 
+  arrange(desc(total_cus))
+
+ggplot(cus_seller[-1,], aes(x = total_cus, y = total_seller)) + 
+  geom_point() + 
+  geom_smooth()
+
+cus_seller_scale <- data.frame(cus_seller[,1], scale(cus_seller[,c(2,3)]))
+model_cs <- lm(total_seller ~ total_cus, data = cus_seller_scale[-1,])
+summary(model_cs)
+cus_seller_scale[-1,] %>% add_residuals(model_cs) %>% 
+  ggplot() + geom_point(aes(x = total_cus, y = resid))
+```
+
+### 3.2 cus, seller and population
+```{r}
+pop_cs <- inner_join(pop, cus_seller, by = c('state' = 'customer_state'))
+
+ggplot(pop_cs[-1,], aes(x = total_cus, y = population)) + 
+  geom_point() + 
+  geom_smooth(se = FALSE)
+model_pop_cus <- lm(total_cus~population, data = pop_cs)
+summary(model_pop_cus)
+pop_cs %>% add_residuals(model_pop_cus) %>% 
+  ggplot() + geom_point(aes(x = total_cus, y = resid))
+
+ggplot(pop_cs[-1,], aes(x = total_seller, y = population)) + 
+  geom_point() + 
+  geom_smooth(se = FALSE)
+model_pop_seller <- lm(total_seller~population, data = pop_cs)
+summary(model_pop_seller)
+pop_cs %>% add_residuals(model_pop_seller) %>% 
+  ggplot() + geom_point(aes(x = total_seller, y = resid))
+```
+
+### 3.3 bar plot
+```{r}
+pop_cs_bar <- pop_cs %>% 
+  mutate(prop_population = population / sum(population), 
+         prop_cus = total_cus / sum(total_cus), 
+         prop_seller = total_seller / sum(total_seller)) %>% 
+  gather(key = 'type1', value = 'total', population, total_cus, total_seller) %>% 
+  gather(key = 'number', value = 'proportion', prop_population, prop_cus, prop_seller)
+
+ggplot(pop_cs_bar) + 
+  geom_bar(aes(x = state, y = proportion, fill = number), position = 'dodge', stat = 'identity') + 
+  ggtitle('Total value v.s. population in each state')
+```
+
+
+### ~Plot
+```{r}
+ggplot(data = fadm1, mapping = aes(x = long, y = lat, group = group)) + 
+  geom_path() +
+  geom_polygon(data = fadm2, aes(x = long, y = lat),
+               fill = 'grey', alpha = 0.5) +
+  geom_path(data = fadm2, aes(x = long, y = lat), color = "black") + 
+  theme_bw() +
+  geom_point(data = geo_pop, mapping = aes(x = geolocation_lng, y = geolocation_lat, group = state, color = state, size = population))
+```
